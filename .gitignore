@@ -1,0 +1,11 @@
+.gradle/
+.gradle-user/
+.tools/
+analysis/
+**/build/
+local.properties
+*.jks
+*.keystore
+*.p12
+*.pfx
+dist/

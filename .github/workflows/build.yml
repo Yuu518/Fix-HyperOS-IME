@@ -1,0 +1,106 @@
+name: Build APK
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Configure temporary Gradle home
+        run: echo "GRADLE_USER_HOME=$RUNNER_TEMP/hyperos-ime-gradle" >> "$GITHUB_ENV"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-disabled: true
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0'
+          log-accepted-android-sdk-licenses: false
+
+      - name: Verify Android SDK tools
+        run: |
+          command -v sdkmanager
+          test -f "$ANDROID_HOME/platforms/android-35/android.jar"
+          test -x "$ANDROID_HOME/build-tools/35.0.0/apksigner"
+
+      - name: Build and check
+        run: >-
+          bash gradlew --no-daemon --no-build-cache --stacktrace
+          :app:testDebugUnitTest :app:lintDebug
+          :app:assembleRelease
+
+      - name: Sign release APK
+        if: github.event_name != 'pull_request'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          for name in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing signing secret: $name"
+              exit 1
+            fi
+          done
+          keystore="$RUNNER_TEMP/hyperos-ime-signing.jks"
+          trap 'rm -f -- "$keystore"' EXIT
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          signer="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$signer" sign \
+            --ks "$keystore" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KEYSTORE_PASSWORD \
+            --key-pass env:KEY_PASSWORD \
+            --out app/build/outputs/apk/release/app-release.apk \
+            app/build/outputs/apk/release/app-release-unsigned.apk
+          "$signer" verify --verbose --print-certs app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload signed release APK
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: HyperOS-IME-release
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove generated caches
+        if: always()
+        run: >-
+          rm -rf -- .gradle app/build/intermediates app/build/generated
+          app/build/tmp app/build/test-results/testDebugUnitTest/binary
+          "$RUNNER_TEMP/hyperos-ime-gradle/caches/8.13"
+          "$RUNNER_TEMP/hyperos-ime-gradle/caches/jars-9"
+          "$RUNNER_TEMP/hyperos-ime-gradle/caches/journal-1"
+          "$RUNNER_TEMP/hyperos-ime-gradle/.tmp"
+
+      - name: Remove temporary signing key
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/hyperos-ime-signing.jks"

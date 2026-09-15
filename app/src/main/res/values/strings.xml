@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Fix-HyperOS-IME</string>
+    <string name="module_description">修复第三方输入法在HyperOS的全屏键盘优化功能上的问题</string>
+</resources>
