@@ -11,6 +11,8 @@ import android.os.RemoteException;
 import android.provider.Settings;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -18,23 +20,24 @@ final class ClipboardAccess {
     private final MainHook module;
     private final ConcurrentHashMap<Integer, Registration> readers = new ConcurrentHashMap<>();
     private final ThreadLocal<Boolean> reading = new ThreadLocal<>();
+    private boolean suspended;
 
     ClipboardAccess(MainHook module) {
         this.module = module;
     }
 
-    void install(ClassLoader loader) {
+    boolean install(ClassLoader loader) {
         try {
             Class<?> provider = Class.forName("com.miui.provider.InputProvider", false, loader);
             Method check = HookContracts.providerCheck(provider);
             Method call = HookContracts.method(provider, "call", Bundle.class, String.class, String.class, Bundle.class);
-            module.hook(check).intercept(chain -> {
+            module.intercept(check, chain -> {
                 if (Boolean.TRUE.equals(reading.get())) {
                     return true;
                 }
                 return chain.proceed();
             });
-            module.hook(call).intercept(chain -> {
+            module.intercept(call, chain -> {
                 if (!CompatibilityPolicy.REGISTER_METHOD.equals(chain.getArg(0))) {
                     return chain.proceed();
                 }
@@ -46,20 +49,7 @@ final class ClipboardAccess {
                 boolean accepted = token != null && token.isBinderAlive()
                         && isCurrentIme(context, uid, packageName, true);
                 if (accepted) {
-                    Registration registration = new Registration(uid, packageName, token);
-                    try {
-                        token.linkToDeath(registration, 0);
-                        Registration previous = readers.put(uid, registration);
-                        if (previous != null) {
-                            previous.token.unlinkToDeath(previous, 0);
-                        }
-                        if (!token.isBinderAlive()) {
-                            registration.binderDied();
-                            accepted = false;
-                        }
-                    } catch (RemoteException error) {
-                        accepted = false;
-                    }
+                    accepted = register(uid, packageName, token);
                 }
                 Bundle result = new Bundle();
                 result.putBoolean("registered", accepted);
@@ -71,7 +61,7 @@ final class ClipboardAccess {
                     continue;
                 }
                 module.deoptimize(method);
-                module.hook(method).intercept(chain -> {
+                module.intercept(method, chain -> {
                     Boolean previous = reading.get();
                     int uid = Binder.getCallingUid();
                     Registration registration = readers.get(uid);
@@ -96,8 +86,53 @@ final class ClipboardAccess {
                 });
             }
             module.info("Clipboard read guards installed; writes and signatures unchanged");
+            return true;
         } catch (ReflectiveOperationException | RuntimeException error) {
             module.report("Unsupported phrase provider; clipboard hooks unavailable", error);
+            return false;
+        }
+    }
+
+    private synchronized boolean register(int uid, String packageName, IBinder token) {
+        if (suspended || !token.isBinderAlive()) {
+            return false;
+        }
+        Registration registration = new Registration(uid, packageName, token);
+        try {
+            token.linkToDeath(registration, 0);
+            Registration previous = readers.put(uid, registration);
+            if (previous != null) {
+                previous.token.unlinkToDeath(previous, 0);
+            }
+            if (!token.isBinderAlive()) {
+                registration.binderDied();
+                return false;
+            }
+            return true;
+        } catch (RemoteException error) {
+            return false;
+        }
+    }
+
+    synchronized List<Object[]> suspend() {
+        suspended = true;
+        List<Object[]> state = new ArrayList<>();
+        for (Registration registration : readers.values()) {
+            state.add(new Object[]{registration.uid, registration.packageName, registration.token});
+            registration.token.unlinkToDeath(registration, 0);
+        }
+        readers.clear();
+        return state;
+    }
+
+    synchronized void restore(List<Object[]> state) {
+        suspended = false;
+        for (Object[] row : state) {
+            if (!(row[0] instanceof Integer uid) || uid < 10000
+                    || !(row[1] instanceof String packageName) || !(row[2] instanceof IBinder token)) {
+                throw new IllegalArgumentException("Invalid clipboard reload state");
+            }
+            register(uid, packageName, token);
         }
     }
 

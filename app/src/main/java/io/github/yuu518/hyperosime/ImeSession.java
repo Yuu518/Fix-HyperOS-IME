@@ -7,6 +7,8 @@ import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.view.WindowInsets;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 final class ImeSession implements AutoCloseable {
     final ViewGroup inputFrame;
     private final MainHook module;
@@ -17,19 +19,41 @@ final class ImeSession implements AutoCloseable {
     private boolean hadBottom;
     private int lastBottomHeight = -1;
     private final BottomTheme theme;
+    private final AtomicBoolean alive;
 
     ImeSession(MainHook module, InputMethodService service, ViewGroup inputFrame, View root, ViewGroup bottom) {
+        this(module, service, inputFrame, root, bottom, new AtomicBoolean(true));
+    }
+
+    ImeSession(MainHook module, InputMethodService service, ViewGroup inputFrame, View root, ViewGroup bottom,
+               AtomicBoolean alive) {
         this.module = module;
         this.service = service;
         this.inputFrame = inputFrame;
         this.root = root;
         this.bottom = bottom;
+        this.alive = alive;
         this.theme = new BottomTheme(module, service, inputFrame, bottom, this::hasBottom);
     }
 
     void attach() {
         root.getViewTreeObserver().addOnGlobalLayoutListener(layoutListener);
         theme.attach();
+        onLayout();
+        inputFrame.invalidate();
+    }
+
+    Object[] snapshot() {
+        return new Object[]{service, inputFrame, root, bottom, alive};
+    }
+
+    boolean canReload() {
+        return theme.canReload();
+    }
+
+    void destroyed() {
+        alive.set(false);
+        close();
     }
 
     boolean hasBottom() {

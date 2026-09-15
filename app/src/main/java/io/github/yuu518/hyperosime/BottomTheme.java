@@ -45,6 +45,10 @@ final class BottomTheme implements AutoCloseable {
         input.getViewTreeObserver().addOnDrawListener(drawListener);
     }
 
+    boolean canReload() {
+        return !copying;
+    }
+
     private void onDraw() {
         if (!closed && !pending && !copying) {
             pending = true;
@@ -123,6 +127,9 @@ final class BottomTheme implements AutoCloseable {
 
     @Override
     public void close() {
+        if (closed) {
+            return;
+        }
         closed = true;
         handler.removeCallbacks(sample);
         ViewTreeObserver observer = input.getViewTreeObserver();
