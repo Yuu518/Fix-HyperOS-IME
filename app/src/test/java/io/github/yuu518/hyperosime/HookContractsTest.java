@@ -17,6 +17,22 @@ public class HookContractsTest {
         public boolean second() { return false; }
     }
 
+    static class MutableSupport {
+        static int sIsImeSupport;
+    }
+
+    static class FinalSupport {
+        static final int sIsImeSupport = 0;
+    }
+
+    static class InstanceSupport {
+        int sIsImeSupport;
+    }
+
+    static class WrongSupportType {
+        static boolean sIsImeSupport;
+    }
+
     @Test
     public void permissionCheckIgnoresStaticAndArgumentMethods() throws Exception {
         assertEquals("f", HookContracts.providerCheck(Provider.class).getName());
@@ -30,5 +46,13 @@ public class HookContractsTest {
     @Test(expected = NoSuchMethodException.class)
     public void changedMethodReturnTypeIsRejected() throws Exception {
         HookContracts.method(Provider.class, "f", int.class);
+    }
+
+    @Test
+    public void supportPreflightRequiresMutableStaticInteger() throws Exception {
+        assertEquals(int.class, HookContracts.supportField(MutableSupport.class).getType());
+        assertThrows(NoSuchFieldException.class, () -> HookContracts.supportField(FinalSupport.class));
+        assertThrows(NoSuchFieldException.class, () -> HookContracts.supportField(InstanceSupport.class));
+        assertThrows(NoSuchFieldException.class, () -> HookContracts.supportField(WrongSupportType.class));
     }
 }

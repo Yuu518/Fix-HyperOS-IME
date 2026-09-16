@@ -16,6 +16,8 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import io.github.libxposed.api.error.HookFailedError;
+
 final class ClipboardAccess {
     private final MainHook module;
     private final ConcurrentHashMap<Integer, Registration> readers = new ConcurrentHashMap<>();
@@ -31,63 +33,67 @@ final class ClipboardAccess {
             Class<?> provider = Class.forName("com.miui.provider.InputProvider", false, loader);
             Method check = HookContracts.providerCheck(provider);
             Method call = HookContracts.method(provider, "call", Bundle.class, String.class, String.class, Bundle.class);
-            module.intercept(check, chain -> {
-                if (Boolean.TRUE.equals(reading.get())) {
-                    return true;
-                }
-                return chain.proceed();
-            });
-            module.intercept(call, chain -> {
-                if (!CompatibilityPolicy.REGISTER_METHOD.equals(chain.getArg(0))) {
-                    return chain.proceed();
-                }
-                Context context = ((ContentProvider) chain.getThisObject()).getContext();
-                String packageName = (String) chain.getArg(1);
-                Bundle extras = (Bundle) chain.getArg(2);
-                IBinder token = extras == null ? null : extras.getBinder("token");
-                int uid = Binder.getCallingUid();
-                boolean accepted = token != null && token.isBinderAlive()
-                        && isCurrentIme(context, uid, packageName, true);
-                if (accepted) {
-                    accepted = register(uid, packageName, token);
-                }
-                Bundle result = new Bundle();
-                result.putBoolean("registered", accepted);
-                module.info("Clipboard reader " + (accepted ? "registered: " : "rejected: ") + packageName);
-                return result;
-            });
-            for (Method method : provider.getDeclaredMethods()) {
-                if (!method.getName().equals("query") && !method.getName().equals("getType")) {
-                    continue;
-                }
-                module.deoptimize(method);
-                module.intercept(method, chain -> {
-                    Boolean previous = reading.get();
-                    int uid = Binder.getCallingUid();
-                    Registration registration = readers.get(uid);
-                    Context context = ((ContentProvider) chain.getThisObject()).getContext();
-                    boolean allowed = registration != null && registration.token.isBinderAlive()
-                            && isCurrentIme(context, uid, registration.packageName, true);
-                    reading.set(allowed);
-                    try {
-                        Object result = chain.proceed();
-                        if (allowed && method.getName().equals("query")
-                                && registration.readLogged.compareAndSet(false, true)) {
-                            module.info("Clipboard query completed: " + registration.packageName);
-                        }
-                        return result;
-                    } finally {
-                        if (previous == null) {
-                            reading.remove();
-                        } else {
-                            reading.set(previous);
-                        }
+            Method[] methods = provider.getDeclaredMethods();
+            try (HookInstallation installation = new HookInstallation()) {
+                module.intercept(check, chain -> {
+                    if (Boolean.TRUE.equals(reading.get())) {
+                        return true;
                     }
-                });
+                    return chain.proceed();
+                }, installation);
+                module.intercept(call, chain -> {
+                    if (!CompatibilityPolicy.REGISTER_METHOD.equals(chain.getArg(0))) {
+                        return chain.proceed();
+                    }
+                    Context context = ((ContentProvider) chain.getThisObject()).getContext();
+                    String packageName = (String) chain.getArg(1);
+                    Bundle extras = (Bundle) chain.getArg(2);
+                    IBinder token = extras == null ? null : extras.getBinder("token");
+                    int uid = Binder.getCallingUid();
+                    boolean accepted = token != null && token.isBinderAlive()
+                            && isCurrentIme(context, uid, packageName, true);
+                    if (accepted) {
+                        accepted = register(uid, packageName, token);
+                    }
+                    Bundle result = new Bundle();
+                    result.putBoolean("registered", accepted);
+                    module.info("Clipboard reader " + (accepted ? "registered: " : "rejected: ") + packageName);
+                    return result;
+                }, installation);
+                for (Method method : methods) {
+                    if (!method.getName().equals("query") && !method.getName().equals("getType")) {
+                        continue;
+                    }
+                    module.deoptimize(method);
+                    module.intercept(method, chain -> {
+                        Boolean previous = reading.get();
+                        int uid = Binder.getCallingUid();
+                        Registration registration = readers.get(uid);
+                        Context context = ((ContentProvider) chain.getThisObject()).getContext();
+                        boolean allowed = registration != null && registration.token.isBinderAlive()
+                                && isCurrentIme(context, uid, registration.packageName, true);
+                        reading.set(allowed);
+                        try {
+                            Object result = chain.proceed();
+                            if (allowed && method.getName().equals("query")
+                                    && registration.readLogged.compareAndSet(false, true)) {
+                                module.info("Clipboard query completed: " + registration.packageName);
+                            }
+                            return result;
+                        } finally {
+                            if (previous == null) {
+                                reading.remove();
+                            } else {
+                                reading.set(previous);
+                            }
+                        }
+                    }, installation);
+                }
+                installation.commit();
             }
             module.info("Clipboard read guards installed; writes and signatures unchanged");
             return true;
-        } catch (ReflectiveOperationException | RuntimeException error) {
+        } catch (ReflectiveOperationException | RuntimeException | HookFailedError error) {
             module.report("Unsupported phrase provider; clipboard hooks unavailable", error);
             return false;
         }

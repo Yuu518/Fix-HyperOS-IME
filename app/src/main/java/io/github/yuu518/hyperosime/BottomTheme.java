@@ -25,10 +25,7 @@ final class BottomTheme implements AutoCloseable {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final ViewTreeObserver.OnDrawListener drawListener = this::onDraw;
     private final Runnable sample = this::sample;
-    private boolean pending;
-    private boolean copying;
-    private boolean closed;
-    private long nextSample;
+    private final SampleSchedule schedule = new SampleSchedule();
     private int originalAppearance;
     private boolean appearanceChanged;
 
@@ -46,19 +43,21 @@ final class BottomTheme implements AutoCloseable {
     }
 
     boolean canReload() {
-        return !copying;
+        return schedule.canReload();
     }
 
     private void onDraw() {
-        if (!closed && !pending && !copying) {
-            pending = true;
-            handler.postDelayed(sample, Math.max(50, nextSample - SystemClock.uptimeMillis()));
+        postSample(schedule.onDraw(SystemClock.uptimeMillis()));
+    }
+
+    private void postSample(long delay) {
+        if (delay >= 0) {
+            handler.postDelayed(sample, delay);
         }
     }
 
     private void sample() {
-        pending = false;
-        if (closed) {
+        if (!schedule.beginSample()) {
             return;
         }
         Window window = service.getWindow().getWindow();
@@ -81,13 +80,11 @@ final class BottomTheme implements AutoCloseable {
         Rect strip = new Rect(origin[0] + width / 8, y,
                 origin[0] + width * 7 / 8, y + 1);
         Bitmap pixels = Bitmap.createBitmap(24, 1, Bitmap.Config.ARGB_8888);
-        copying = true;
-        nextSample = SystemClock.uptimeMillis() + 750;
+        schedule.copyStarted(SystemClock.uptimeMillis());
         try {
             PixelCopy.request(window, strip, pixels, result -> {
-                copying = false;
                 try {
-                    if (result == PixelCopy.SUCCESS && !closed && visible.getAsBoolean()) {
+                    if (result == PixelCopy.SUCCESS && !schedule.isClosed() && visible.getAsBoolean()) {
                         int[] colors = new int[24];
                         pixels.getPixels(colors, 0, 24, 0, 0, 24, 1);
                         Arrays.sort(colors);
@@ -109,11 +106,12 @@ final class BottomTheme implements AutoCloseable {
                     }
                 } finally {
                     pixels.recycle();
+                    postSample(schedule.copyFinished(SystemClock.uptimeMillis()));
                 }
             }, handler);
         } catch (IllegalArgumentException error) {
-            copying = false;
             pixels.recycle();
+            postSample(schedule.copyFinished(SystemClock.uptimeMillis()));
         }
     }
 
@@ -127,10 +125,10 @@ final class BottomTheme implements AutoCloseable {
 
     @Override
     public void close() {
-        if (closed) {
+        if (schedule.isClosed()) {
             return;
         }
-        closed = true;
+        schedule.close();
         handler.removeCallbacks(sample);
         ViewTreeObserver observer = input.getViewTreeObserver();
         if (observer.isAlive()) {

@@ -34,19 +34,30 @@ final class HookContracts {
         return found;
     }
 
-    static Object field(Class<?> owner, String name, Object instance)
-            throws ReflectiveOperationException {
+    static Field field(Class<?> owner, String name) throws NoSuchFieldException {
         Field field = owner.getDeclaredField(name);
         field.setAccessible(true);
-        return field.get(instance);
+        return field;
     }
 
-    static void setSupport(Class<?> owner) throws ReflectiveOperationException {
-        Field field = owner.getDeclaredField("sIsImeSupport");
-        field.setAccessible(true);
-        if (field.getType() != int.class || !Modifier.isStatic(field.getModifiers())) {
+    static Object field(Class<?> owner, String name, Object instance)
+            throws ReflectiveOperationException {
+        return field(owner, name).get(instance);
+    }
+
+    static Field staticField(Class<?> owner, String name) throws NoSuchFieldException {
+        Field field = field(owner, name);
+        if (!Modifier.isStatic(field.getModifiers())) {
+            throw new NoSuchFieldException("Expected static field: " + owner.getName() + "#" + name);
+        }
+        return field;
+    }
+
+    static Field supportField(Class<?> owner) throws NoSuchFieldException {
+        Field field = staticField(owner, "sIsImeSupport");
+        if (field.getType() != int.class || Modifier.isFinal(field.getModifiers())) {
             throw new NoSuchFieldException("Unexpected sIsImeSupport field");
         }
-        field.setInt(null, 1);
+        return field;
     }
 }

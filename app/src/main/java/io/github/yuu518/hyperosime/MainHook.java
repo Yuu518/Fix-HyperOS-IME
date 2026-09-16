@@ -19,6 +19,7 @@ import android.view.inputmethod.InputMethodManager;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Executable;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -30,6 +31,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.github.libxposed.api.XposedModule;
+import io.github.libxposed.api.error.HookFailedError;
 
 public final class MainHook extends XposedModule {
     static final String TAG = "HyperOSIME";
@@ -80,7 +82,7 @@ public final class MainHook extends XposedModule {
                 installIme(targetLoader);
             }
             return true;
-        } catch (ReflectiveOperationException | RuntimeException error) {
+        } catch (ReflectiveOperationException | RuntimeException | HookFailedError error) {
             report("Unable to install IME hooks in " + targetPackage, error);
             return false;
         }
@@ -186,7 +188,7 @@ public final class MainHook extends XposedModule {
                         registerReader(service);
                     }
                     info("Hot reload complete: " + targetPackage + "; sessions=" + sessions.size());
-                } catch (Exception error) {
+                } catch (Exception | HookFailedError error) {
                     retiring = true;
                     for (ImeSession session : sessions.values()) {
                         session.close();
@@ -208,7 +210,7 @@ public final class MainHook extends XposedModule {
                 }
                 return null;
             });
-        } catch (Exception error) {
+        } catch (Exception | HookFailedError error) {
             if (error instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
@@ -238,21 +240,27 @@ public final class MainHook extends XposedModule {
         }
     }
 
-    void intercept(Method method, Hooker hooker) {
-        intercept(method, hooker, false);
+    void intercept(Method method, Hooker hooker, HookInstallation installation) {
+        intercept(method, hooker, false, installation);
     }
 
-    private void intercept(Method method, Hooker hooker, boolean lifecycle) {
+    private void intercept(Method method, Hooker hooker, boolean lifecycle, HookInstallation installation) {
         if (retiring) {
-            return;
+            throw new IllegalStateException("Module is retiring");
         }
         Hooker guarded = chain -> retiring && !lifecycle ? chain.proceed() : hooker.intercept(chain);
-        HookHandle previous = oldHooks.remove(method);
-        if (previous == null) {
-            activeHooks.add(hook(method).intercept(guarded));
-        } else {
-            activeHooks.add(previous.replaceHook(guarded));
-        }
+        HookHandle previous = oldHooks.get(method);
+        HookHandle handle = previous == null
+                ? hook(method).intercept(guarded) : previous.replaceHook(guarded);
+        oldHooks.remove(method);
+        activeHooks.add(handle);
+        installation.onRollback(() -> {
+            try {
+                handle.unhook();
+            } finally {
+                activeHooks.remove(handle);
+            }
+        });
     }
 
     private void attachSession(InputMethodService service, ViewGroup input, View root, ViewGroup bottom) {
@@ -268,13 +276,15 @@ public final class MainHook extends XposedModule {
         session.attach();
     }
 
-    private void installStockManager(Class<?> manager) throws ReflectiveOperationException {
+    private synchronized void installStockManager(Class<?> manager) throws ReflectiveOperationException {
         if (retiring) {
             return;
         }
-        if (!installedManagers.contains(manager)) {
-            installSwitcher(manager);
-            installedManagers.add(manager);
+        if (HookInstallation.installOnce(installedManagers, manager, installation -> {
+            Method list = HookContracts.method(manager, "getSupportIme", java.util.List.class);
+            Field helper = HookContracts.staticField(manager, "sBottomViewHelper");
+            installSwitcher(list, helper, installation);
+        })) {
             info("Stock IME switcher-only hook installed: " + targetPackage);
         }
     }
@@ -282,19 +292,20 @@ public final class MainHook extends XposedModule {
     private void installStockSwitcher(ClassLoader loader) throws ReflectiveOperationException {
         Class<?> moduleManager = Class.forName("android.inputmethodservice.InputMethodModuleManager", false, loader);
         Method loadDex = HookContracts.method(moduleManager, "loadDex", void.class, ClassLoader.class, String.class);
-        intercept(loadDex, chain -> {
-            Object result = chain.proceed();
-            try {
-                Class<?> manager = Class.forName("com.miui.inputmethod.InputMethodBottomManager", false,
-                        (ClassLoader) chain.getArg(0));
-                synchronized (installedManagers) {
+        try (HookInstallation installation = new HookInstallation()) {
+            intercept(loadDex, chain -> {
+                Object result = chain.proceed();
+                try {
+                    Class<?> manager = Class.forName("com.miui.inputmethod.InputMethodBottomManager", false,
+                            (ClassLoader) chain.getArg(0));
                     installStockManager(manager);
+                } catch (ReflectiveOperationException | RuntimeException | HookFailedError error) {
+                    report("Unable to install stock IME switcher hook", error);
                 }
-            } catch (ReflectiveOperationException | RuntimeException error) {
-                report("Unable to install stock IME switcher hook", error);
-            }
-            return result;
-        });
+                return result;
+            }, installation);
+            installation.commit();
+        }
     }
 
     private void installIme(ClassLoader loader) throws ReflectiveOperationException {
@@ -305,67 +316,74 @@ public final class MainHook extends XposedModule {
                 InputMethodManager.class, InputMethodService.class);
         Method loadDex = HookContracts.method(moduleManager, "loadDex", void.class, ClassLoader.class, String.class);
         Method support = HookContracts.method(injector, "isImeSupport", boolean.class, Context.class);
+        Field supportFlag = HookContracts.supportField(injector);
+        Method dispatchInsets = HookContracts.method(View.class, "dispatchApplyWindowInsets",
+                WindowInsets.class, WindowInsets.class);
+        Method rootInsets = HookContracts.method(View.class, "getRootWindowInsets", WindowInsets.class);
+        Method destroy = HookContracts.method(InputMethodService.class, "onDestroy", void.class);
 
-        intercept(support, chain -> {
-            Context context = (Context) chain.getArg(0);
-            return context != null && targetPackage.equals(context.getPackageName())
-                    ? true : chain.proceed();
-        });
-        intercept(loadDex, chain -> {
-            Object result = chain.proceed();
-            try {
-                installPhrase((ClassLoader) chain.getArg(0));
-            } catch (ReflectiveOperationException | RuntimeException error) {
-                report("Unable to install phrase hooks", error);
-            }
-            return result;
-        });
-        intercept(addBottom, chain -> {
-            InputMethodService service = (InputMethodService) chain.getArg(6);
-            if (!targetPackage.equals(service.getPackageName())) {
-                return chain.proceed();
-            }
-            registerReader(service);
-            HookContracts.setSupport(injector);
-            Object result = chain.proceed();
-            try {
-                attachSession(service, (ViewGroup) chain.getArg(2),
-                        (View) chain.getArg(3), (ViewGroup) chain.getArg(4));
-                info("Bottom attached: " + targetPackage);
-            } catch (RuntimeException error) {
-                report("Unable to track IME layout", error);
-            }
-            return result;
-        });
-        intercept(HookContracts.method(View.class, "dispatchApplyWindowInsets", WindowInsets.class, WindowInsets.class),
-                chain -> {
-                    View view = (View) chain.getThisObject();
-                    for (ImeSession session : sessions.values()) {
-                        if (session.inputFrame == view && session.hasBottom()) {
-                            return chain.proceed(new Object[]{session.withoutNavigationBottom((WindowInsets) chain.getArg(0))});
-                        }
-                    }
+        try (HookInstallation installation = new HookInstallation()) {
+            intercept(support, chain -> {
+                Context context = (Context) chain.getArg(0);
+                return context != null && targetPackage.equals(context.getPackageName())
+                        ? true : chain.proceed();
+            }, installation);
+            intercept(loadDex, chain -> {
+                Object result = chain.proceed();
+                try {
+                    installPhrase((ClassLoader) chain.getArg(0));
+                } catch (ReflectiveOperationException | RuntimeException | HookFailedError error) {
+                    report("Unable to install phrase hooks", error);
+                }
+                return result;
+            }, installation);
+            intercept(addBottom, chain -> {
+                InputMethodService service = (InputMethodService) chain.getArg(6);
+                if (!targetPackage.equals(service.getPackageName())) {
                     return chain.proceed();
-                });
-        intercept(HookContracts.method(View.class, "getRootWindowInsets", WindowInsets.class), chain -> {
-            WindowInsets original = (WindowInsets) chain.proceed();
-            View view = (View) chain.getThisObject();
-            if (original != null) {
+                }
+                registerReader(service);
+                supportFlag.setInt(null, 1);
+                Object result = chain.proceed();
+                try {
+                    attachSession(service, (ViewGroup) chain.getArg(2),
+                            (View) chain.getArg(3), (ViewGroup) chain.getArg(4));
+                    info("Bottom attached: " + targetPackage);
+                } catch (RuntimeException error) {
+                    report("Unable to track IME layout", error);
+                }
+                return result;
+            }, installation);
+            intercept(dispatchInsets, chain -> {
+                View view = (View) chain.getThisObject();
                 for (ImeSession session : sessions.values()) {
-                    if (session.hasBottom() && session.isKeyboardWindow(view)) {
-                        return session.withoutNavigationBottom(original);
+                    if (session.inputFrame == view && session.hasBottom()) {
+                        return chain.proceed(new Object[]{session.withoutNavigationBottom((WindowInsets) chain.getArg(0))});
                     }
                 }
-            }
-            return original;
-        });
-        intercept(HookContracts.method(InputMethodService.class, "onDestroy", void.class), chain -> {
-            ImeSession session = sessions.remove((InputMethodService) chain.getThisObject());
-            if (session != null) {
-                session.destroyed();
-            }
-            return chain.proceed();
-        }, true);
+                return chain.proceed();
+            }, installation);
+            intercept(rootInsets, chain -> {
+                WindowInsets original = (WindowInsets) chain.proceed();
+                View view = (View) chain.getThisObject();
+                if (original != null) {
+                    for (ImeSession session : sessions.values()) {
+                        if (session.hasBottom() && session.isKeyboardWindow(view)) {
+                            return session.withoutNavigationBottom(original);
+                        }
+                    }
+                }
+                return original;
+            }, installation);
+            intercept(destroy, chain -> {
+                ImeSession session = sessions.remove((InputMethodService) chain.getThisObject());
+                if (session != null) {
+                    session.destroyed();
+                }
+                return chain.proceed();
+            }, true, installation);
+            installation.commit();
+        }
         info("IME hooks installed: " + targetPackage);
     }
 
@@ -374,52 +392,61 @@ public final class MainHook extends XposedModule {
             return;
         }
         Class<?> manager = Class.forName("com.miui.inputmethod.InputMethodBottomManager", false, loader);
-        if (installedManagers.contains(manager)) {
-            return;
-        }
-        Method support = HookContracts.method(manager, "isImeSupport", boolean.class, InputMethodService.class);
-        intercept(support, chain -> {
-            InputMethodService service = (InputMethodService) chain.getArg(0);
-            return service != null && targetPackage.equals(service.getPackageName()) ? true : chain.proceed();
-        });
-        HookContracts.setSupport(manager);
-        bottomColor = HookContracts.method(manager, "setBottomColor", void.class,
-                boolean.class, int.class, int.class, int.class);
-        installedManagers.add(manager);
-        intercept(HookContracts.method(manager, "onWindowShown", void.class), chain -> {
-            Object helper = HookContracts.field(manager, "sBottomViewHelper", null);
-            if (helper != null) {
-                InputMethodService service = (InputMethodService) HookContracts.field(helper.getClass(), "mInputMethodService", helper);
-                registerReader(service);
-            }
-            return chain.proceed();
-        });
-        Class<?> util = Class.forName("com.miui.inputmethod.InputMethodUtil", false, loader);
-        for (boolean left : new boolean[]{true, false}) {
-            Method button = HookContracts.method(util, left ? "getLeftBottomSelectValue" : "getRightBottomSelectValue",
+        if (HookInstallation.installOnce(installedManagers, manager, installation -> {
+            Method support = HookContracts.method(manager, "isImeSupport", boolean.class, InputMethodService.class);
+            Field supportFlag = HookContracts.supportField(manager);
+            Method color = HookContracts.method(manager, "setBottomColor", void.class,
+                    boolean.class, int.class, int.class, int.class);
+            HookContracts.staticField(manager, "sBottomView");
+            Field helperField = HookContracts.staticField(manager, "sBottomViewHelper");
+            Method shown = HookContracts.method(manager, "onWindowShown", void.class);
+            Method list = HookContracts.method(manager, "getSupportIme", java.util.List.class);
+            Class<?> util = Class.forName("com.miui.inputmethod.InputMethodUtil", false, loader);
+            Method leftButton = HookContracts.method(util, "getLeftBottomSelectValue",
                     String.class, Context.class);
-            intercept(button, chain -> {
-                Context context = (Context) chain.getArg(0);
-                String value = Settings.Secure.getString(context.getContentResolver(),
-                        left ? "full_screen_keyboard_left_function" : "full_screen_keyboard_right_function");
-                return CompatibilityPolicy.buttonFunction(value, left);
-            });
+            Method rightButton = HookContracts.method(util, "getRightBottomSelectValue",
+                    String.class, Context.class);
+
+            intercept(support, chain -> {
+                InputMethodService service = (InputMethodService) chain.getArg(0);
+                return service != null && targetPackage.equals(service.getPackageName()) ? true : chain.proceed();
+            }, installation);
+            installation.setSupport(supportFlag);
+            intercept(shown, chain -> {
+                Object helper = helperField.get(null);
+                if (helper != null) {
+                    InputMethodService service = (InputMethodService) HookContracts.field(helper.getClass(), "mInputMethodService", helper);
+                    registerReader(service);
+                }
+                return chain.proceed();
+            }, installation);
+            for (boolean left : new boolean[]{true, false}) {
+                intercept(left ? leftButton : rightButton, chain -> {
+                    Context context = (Context) chain.getArg(0);
+                    String value = Settings.Secure.getString(context.getContentResolver(),
+                            left ? "full_screen_keyboard_left_function" : "full_screen_keyboard_right_function");
+                    return CompatibilityPolicy.buttonFunction(value, left);
+                }, installation);
+            }
+            installSwitcher(list, helperField, installation);
+            Method previousColor = bottomColor;
+            installation.onRollback(() -> bottomColor = previousColor);
+            bottomColor = color;
+        })) {
+            info("Phrase support and switcher hooks installed: " + targetPackage);
         }
-        installSwitcher(manager);
-        info("Phrase support and switcher hooks installed: " + targetPackage);
     }
 
-    private void installSwitcher(Class<?> manager) throws ReflectiveOperationException {
-        Method list = HookContracts.method(manager, "getSupportIme", java.util.List.class);
+    private void installSwitcher(Method list, Field helperField, HookInstallation installation) {
         intercept(list, chain -> {
-            Object helper = HookContracts.field(manager, "sBottomViewHelper", null);
+            Object helper = helperField.get(null);
             if (helper == null) {
                 return chain.proceed();
             }
             InputMethodService service = (InputMethodService) HookContracts.field(helper.getClass(), "mInputMethodService", helper);
             InputMethodManager imm = service.getSystemService(InputMethodManager.class);
             return new ArrayList<>(imm.getEnabledInputMethodList());
-        });
+        }, installation);
     }
 
     private void registerReader(InputMethodService service) {
