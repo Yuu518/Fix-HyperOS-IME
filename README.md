@@ -1,106 +1,48 @@
-# HyperOS 全面屏键盘优化
+# Fix HyperOS IME
 
-使用 **libxposed API 102**，为 LSPosed 作用域中选中的第三方输入法接入 HyperOS 系统底部栏。
+## Purpose
 
-## 使用
+An LSPosed module built with **libxposed API 102** that enables the HyperOS keyboard bottom bar for third-party input methods, including Gboard and WeChat Keyboard. It provides keyboard switching and access to the system clipboard, removes duplicate bottom spacing, and matches the bar color to the keyboard.
 
-1. 安装模块 APK，在支持 API 102 的 LSPosed 中启用模块。
-2. 在模块作用域勾选需要适配的输入法。微信输入法和 Gboard 是推荐项，也可以手动选择其他输入法。
-3. 同时勾选 **剪贴板和常用语（`com.miui.phrase`）**，用于系统剪贴板读取。
-4. 首次启用或修改作用域后，重启所选输入法和“剪贴板和常用语”，或者重启手机。
-5. 系统设置中启用全面屏手势和全面屏键盘优化，在任意应用的输入框中验证效果。
+The module requires Android 14 or later, a Chinese HyperOS ROM with Xiaomi's keyboard bottom bar implementation, and an LSPosed framework supporting API 102. It operates in the selected keyboard processes and uses `com.miui.phrase` for clipboard access. It has no standalone UI.
 
-模块没有独立界面、桌面入口或 LSPosed 设置页，仅通过 LSPosed 启用并选择作用域。支持热重载的框架可以在模块 APK 更新后自动加载新代码；修改作用域仍需重启对应输入法进程。
+## Local Build
 
-无需勾选系统框架。若需要从小爱或搜狗小米版的左下角面板切换到第三方输入法，也勾选对应的原生输入法；对原生输入法仅补全切换列表，保留它原本的支持判断、布局和颜色行为。
+Install JDK 17 or later, Android SDK Platform 35, and Android SDK Build Tools 35.0.0. Set `JAVA_HOME` to your JDK and configure the SDK path through `ANDROID_HOME` or `sdk.dir` in `local.properties`.
 
-## 实现范围
+From the repository root, build a debug APK on Windows:
 
-- 在被勾选的输入法进程内，放行 `InputMethodServiceInjector` 的输入法支持判断。
-- 在 `InputMethodModuleManager.loadDex()` 后处理动态加载的 `InputMethodBottomManager`，放行第二层支持判断。
-- 保留系统对优化开关、手势导航、横屏、悬浮和设备姿态的判断。
-- 系统底部栏实际显示时，在键盘输入区域分发的 `WindowInsets` 和该输入法窗口的根 inset 读取中去掉导航栏底部 inset，保留顶部、侧边和其他 inset 类型。直接读取系统底部栏及其子视图的根 inset 保持原值；底部栏隐藏后恢复原始行为。
-- 输入法切换面板使用系统返回的已启用输入法列表，不使用小米定制输入法白名单过滤。
-- 第三方输入法显示底部栏时，从键盘与底部栏接缝上方 1 像素高的区域取样，在内存中缩至 24 个像素，用中位颜色调用系统着色接口，并按亮度调整按钮及手势条。绘制时至多每 750 ms 取样一次，颜色未变不重设背景；不保存取样图片。
-- 保留切换输入法、剪贴板和无功能设置。厂商专用语音、语言与键盘类型操作回退到左侧“切换输入法”、右侧“剪贴板”，不改写全局设置。
-- 所选输入法向系统剪贴板组件注册进程 Binder；组件只为已注册且 UID、包名、当前默认输入法服务都匹配的调用开放 `query` 和 `getType` 检查。进程死亡后撤销注册，每次显示键盘会重新注册。
-- 不伪造包名，不全局 Hook PackageManager，不改写剪贴板历史，不放宽写入及签名检查。不会读取或记录输入文本与剪贴板内容。
+```powershell
+./gradlew.bat :app:assembleDebug
+```
 
-## 兼容边界
-
-- 最低 Android 14；需要含小米输入法底部栏实现的 HyperOS 国行系统，以及 `com.miui.phrase`。
-- 开发依据：HyperOS `OS4.0.0.39.XPBCNXM` / Android 17，剪贴板和常用语 `5.7.2`（10272）。
-- 第三方输入法若自行绘制底部留白、不通过 WindowInsets 计算布局，仍可能需要单独适配；不通过强制固定键盘高度处理。
-- 不模拟搜狗、小爱专用广播协议。图片、渐变皮肤使用接缝的代表色，不能将完整图案延伸到底部栏；取色不可用时保留系统颜色。
-- 其他版本的类或方法签名不匹配时记录错误并保留原行为。Provider 权限方法存在多个候选时拒绝放行。
-- 从 0.2.0 起启用 API 102 热重载，需要框架支持自动更新重载；框架不支持或交接失败时仍需重启目标进程。
-
-## 更新后热重载
-
-模块通过 `autoHotReload=true` 和 `onHotReloading` / `onHotReloaded` 回调支持自动更新重载，无需增加界面或 Root 重启按钮。
-
-- 旧代码在主线程移除布局、绘制监听器并取消待执行取色任务；尚未完成的取色请求不会直接丢弃，无法安全交接时拒绝此次重载。
-- 新代码主动替换旧 Hook，并接管已有键盘窗口，不依赖系统再次调用启动回调。交接期间已销毁的输入法服务不会被重新接管。
-- 交接数据使用 Java / Android / 目标应用已有对象，不传递旧模块实例、监听器或回调。剪贴板组件迁移注册记录、重新绑定死亡通知，每次读取仍检查当前输入法身份。
-- 主线程繁忙时，尚未开始的交接任务会被取消，避免重载已拒绝后又延迟执行清理。失败会写入 `HyperOSIME` 日志。
-
-**首次从 0.1.0 或其他未实现热重载的版本升级到 0.2.0 后，必须重启一次作用域应用。** 后续使用相同应用 ID、相同签名的模块更新才能自动尝试重载。框架是否成功加载新版本，以各进程日志中的 `Hot reload complete` 为准；出现失败日志时重启对应应用。
-
-热重载用于更新本模块 APK，不会自动修复输入法或 HyperOS 更新造成的接口不兼容。
-
-## 构建
-
-### GitHub Actions
-
-工作流位于 `.github/workflows/build.yml`，在 push、pull request 或手动运行时构建。
-
-在 GitHub 的 **Actions → Build APK → Run workflow** 启动任务，完成后从 Artifacts 下载 `HyperOS-IME-release`，其中包含使用固定密钥签名并验证通过的 Release APK，可直接安装。仅上传这一份产物。
-
-CI 使用 JDK 21、SDK 35 和项目 Gradle Wrapper，运行单元测试和 Android Lint，仅打包 Release APK，禁用 Gradle 缓存复用，构建结束后清理生成缓存。Artifact 保留 14 天；持续升级请使用相同密钥签名的 Release APK。
-
-首次运行前，在仓库 **Settings → Secrets and variables → Actions** 配置：
-
-| Secret | 内容 |
-| --- | --- |
-| `ANDROID_KEYSTORE_BASE64` | JKS 或 PKCS12 密钥库文件的 Base64 内容 |
-| `ANDROID_KEYSTORE_PASSWORD` | 密钥库密码 |
-| `ANDROID_KEY_ALIAS` | 签名密钥别名 |
-| `ANDROID_KEY_PASSWORD` | 签名密钥密码 |
-
-push 和手动运行会签名并上传 Release；缺少上述 Secrets 时明确失败。Pull request 运行检查和编译验证，不读取签名 Secrets，也不上传产物。临时密钥在任务结束时删除，不上传到 Artifact。
-
-已有密钥应继续复用。若还没有密钥，可在本机用 JDK 创建并妥善备份，按提示输入密码：
+On Linux or macOS:
 
 ```sh
-keytool -genkeypair -keystore hyperos-ime-release.jks -alias hyperos-ime -keyalg RSA -keysize 3072 -validity 10000
+./gradlew :app:assembleDebug
 ```
 
-Windows 可将密钥库的 Base64 内容复制到剪贴板，再粘贴进 `ANDROID_KEYSTORE_BASE64`：
+The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
+
+To run unit tests and Android Lint:
 
 ```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path ./hyperos-ime-release.jks))) | Set-Clipboard
+./gradlew.bat :app:testDebugUnitTest :app:lintDebug
 ```
 
-密钥文件不要提交到仓库。使用不同于当前已安装 APK 的签名时，Android 不允许直接覆盖安装。签名命令使用 Android SDK 的 [apksigner](https://developer.android.com/tools/apksigner)。
-
-### 本地构建
-
-需要 JDK 17 或更高版本、Android SDK 35 和 Build Tools 35.0.0。
+To build a release APK:
 
 ```powershell
-./gradlew.bat :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+./gradlew.bat :app:assembleRelease
 ```
 
-Linux/macOS 使用 `./gradlew`。SDK 路径通过 `local.properties` 或 `ANDROID_HOME` 指定。
+Use `./gradlew` instead of `./gradlew.bat` on Linux or macOS. The release APK is written to `app/build/outputs/apk/release/app-release-unsigned.apk`. Sign it with your own key using the Android SDK's `apksigner` before installation. Reuse the same signing key for subsequent updates.
 
-调试 APK 输出到 `app/build/outputs/apk/debug/`。发布构建 `:app:assembleRelease` 默认未签名，应使用自己的签名密钥。
+## How It Works
 
-## 诊断
-
-LSPosed 日志标签为 `HyperOSIME`，记录 Hook 安装、注册结果和窗口尺寸，不记录输入内容。
-
-测试应覆盖：微信输入法、Gboard、输入法切换面板、系统剪贴板、横屏、悬浮键盘、优化开关关闭、目标进程重启，以及取消作用域后的行为。
-
-本仓库的 `analysis/` 是设备静态分析与验证材料，`.tools/` 是本地构建工具，均不纳入版本控制或 APK。
-
-本次实机验证结果见 [VALIDATION.md](VALIDATION.md)。
+- **Bottom bar support:** Hooks `InputMethodServiceInjector` in selected third-party keyboard processes to allow HyperOS keyboard support checks. After `InputMethodModuleManager.loadDex()`, it also hooks the dynamically loaded `InputMethodBottomManager`. System checks for gesture navigation, the optimization setting, orientation, floating mode, and device posture remain in effect.
+- **Window insets:** Removes only the bottom navigation bar inset from the keyboard content while the system bottom bar is visible. Other insets and the bottom bar's own inset reads are preserved. Normal behavior resumes when the bar is hidden.
+- **Keyboard switching and buttons:** Uses Android's enabled input method list instead of Xiaomi's filtered list. Unsupported vendor-specific button actions fall back to keyboard switching on the left and the clipboard on the right, without changing global settings. Stock Xiaomi keyboards only receive the switching-list adjustment.
+- **Color matching:** Samples a one-pixel-high strip above the keyboard/bar boundary, reduces it to 24 pixels in memory, and applies the median color through the system bar's theme API. Button and gesture indicator contrast follows the sampled brightness. Sampling is limited to once every 750 ms; no images are saved.
+- **Clipboard access:** Registers each selected keyboard process with `com.miui.phrase` using a Binder token. Read checks for `query` and `getType` require a registered caller whose UID, package, and input method service match the current default keyboard. Registrations expire when the process dies. Write and signature checks remain unchanged, and the module does not log typed text or clipboard contents.
+- **Hot reload:** Uses API 102 lifecycle callbacks to remove old listeners, replace hooks, and transfer active keyboard sessions and clipboard registrations when the framework supports module updates without restarting target processes. Unsafe state handoffs are rejected.
