@@ -1,6 +1,10 @@
 package io.github.yuu518.hyperosime;
 
+import java.util.Arrays;
+import java.util.Collection;
+
 final class CompatibilityPolicy {
+    static final String SYSTEM_SCOPE = "system";
     static final String PHRASE_PACKAGE = "com.miui.phrase";
     static final String PROVIDER_AUTHORITY = "com.miui.phrase.input.provider";
     static final String REGISTER_METHOD = "hyperos_ime_register_reader_v1";
@@ -20,6 +24,12 @@ final class CompatibilityPolicy {
             return configured;
         }
         return left ? "switch_input_method" : "clipboard_phrase";
+    }
+
+    static boolean isVisibleToCurrentIme(String target, String[] callerPackages, String currentIme,
+                                         Collection<String> enabledPackages) {
+        return target != null && currentIme != null && callerPackages != null
+                && Arrays.asList(callerPackages).contains(currentIme) && enabledPackages.contains(target);
     }
 
     static boolean isReader(int callerUid, int imeUid, String callerPackage,

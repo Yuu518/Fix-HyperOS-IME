@@ -2,6 +2,8 @@ package io.github.yuu518.hyperosime;
 
 import org.junit.Test;
 
+import java.util.List;
+
 import static org.junit.Assert.*;
 
 public class CompatibilityPolicyTest {
@@ -12,6 +14,18 @@ public class CompatibilityPolicyTest {
         assertEquals("switch_input_method", CompatibilityPolicy.buttonFunction(null, true));
         assertEquals("clipboard_phrase", CompatibilityPolicy.buttonFunction("clipboard_phrase", true));
         assertEquals("no_function", CompatibilityPolicy.buttonFunction("no_function", false));
+    }
+
+    @Test
+    public void onlyCurrentImeSeesOtherEnabledImes() {
+        List<String> enabled = List.of("wetype", "gboard");
+        String[] caller = {"wetype"};
+        assertTrue(CompatibilityPolicy.isVisibleToCurrentIme("gboard", caller, "wetype", enabled));
+        assertFalse(CompatibilityPolicy.isVisibleToCurrentIme("disabled", caller, "wetype", enabled));
+        assertFalse(CompatibilityPolicy.isVisibleToCurrentIme("gboard", new String[]{"app"}, "wetype", enabled));
+        assertFalse(CompatibilityPolicy.isVisibleToCurrentIme("gboard", caller, null, enabled));
+        assertFalse(CompatibilityPolicy.isVisibleToCurrentIme("gboard", null, "wetype", enabled));
+        assertFalse(CompatibilityPolicy.isVisibleToCurrentIme(null, caller, "wetype", enabled));
     }
 
     @Test

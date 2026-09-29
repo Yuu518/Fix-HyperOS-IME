@@ -1,5 +1,6 @@
 package io.github.yuu518.hyperosime;
 
+import android.content.ComponentName;
 import android.content.Context;
 import android.graphics.drawable.ColorDrawable;
 import android.inputmethodservice.InputMethodService;
@@ -15,6 +16,7 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
+import android.view.inputmethod.InputMethodInfo;
 import android.view.inputmethod.InputMethodManager;
 
 import java.lang.reflect.Method;
@@ -63,6 +65,17 @@ public final class MainHook extends XposedModule {
         installPackage();
     }
 
+    @Override
+    public void onSystemServerStarting(SystemServerStartingParam param) {
+        if (initialized) {
+            return;
+        }
+        initialized = true;
+        targetPackage = CompatibilityPolicy.SYSTEM_SCOPE;
+        targetLoader = param.getClassLoader();
+        installPackage();
+    }
+
     private boolean installPackage() {
         if (CompatibilityPolicy.PHRASE_PACKAGE.equals(targetPackage)) {
             if (clipboard == null) {
@@ -76,7 +89,9 @@ public final class MainHook extends XposedModule {
             return true;
         }
         try {
-            if (CompatibilityPolicy.isStockIme(targetPackage)) {
+            if (CompatibilityPolicy.SYSTEM_SCOPE.equals(targetPackage)) {
+                installImeVisibility(targetLoader);
+            } else if (CompatibilityPolicy.isStockIme(targetPackage)) {
                 installStockSwitcher(targetLoader);
             } else {
                 installIme(targetLoader);
@@ -274,6 +289,43 @@ public final class MainHook extends XposedModule {
         ImeSession session = new ImeSession(this, service, input, root, bottom);
         sessions.put(service, session);
         session.attach();
+    }
+
+    private void installImeVisibility(ClassLoader loader) throws ReflectiveOperationException {
+        Class<?> service = Class.forName("com.android.server.inputmethod.InputMethodManagerService", false, loader);
+        Class<?> settingsType = Class.forName("com.android.server.inputmethod.InputMethodSettings", false, loader);
+        Method access = HookContracts.method(service, "canCallerAccessInputMethod", boolean.class,
+                String.class, int.class, int.class, settingsType);
+        Method selected = HookContracts.method(settingsType, "getSelectedInputMethod", String.class);
+        Method enabled = HookContracts.method(settingsType, "getEnabledInputMethodList", ArrayList.class);
+        Field context = HookContracts.field(service, "mContext");
+        try (HookInstallation installation = new HookInstallation()) {
+            intercept(access, chain -> {
+                if ((Boolean) chain.proceed()) {
+                    return true;
+                }
+                try {
+                    Object settings = chain.getArg(3);
+                    String id = (String) selected.invoke(settings);
+                    ComponentName current = id == null ? null : ComponentName.unflattenFromString(id);
+                    if (current == null) {
+                        return false;
+                    }
+                    String[] callers = ((Context) context.get(chain.getThisObject())).getPackageManager()
+                            .getPackagesForUid((Integer) chain.getArg(1));
+                    List<String> packages = new ArrayList<>();
+                    for (Object info : (List<?>) enabled.invoke(settings)) {
+                        packages.add(((InputMethodInfo) info).getPackageName());
+                    }
+                    return CompatibilityPolicy.isVisibleToCurrentIme((String) chain.getArg(0), callers,
+                            current.getPackageName(), packages);
+                } catch (ReflectiveOperationException | RuntimeException error) {
+                    return false;
+                }
+            }, installation);
+            installation.commit();
+        }
+        info("IME visibility hook installed: system");
     }
 
     private synchronized void installStockManager(Class<?> manager) throws ReflectiveOperationException {
