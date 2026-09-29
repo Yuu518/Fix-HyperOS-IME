@@ -90,7 +90,7 @@ final class BottomTheme implements AutoCloseable {
                         Arrays.sort(colors);
                         int color = colors[colors.length / 2] | 0xff000000;
                         boolean light = Color.luminance(color) > 0.35f;
-                        module.applyBottomColor(color, light ? 0xff303030 : 0xffeeeeee);
+                        module.applyBottomColor(color, light ? 0xff303030 : 0xffeeeeee, false);
                         WindowInsetsController controller = window.getInsetsController();
                         if (controller != null) {
                             int mask = WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;

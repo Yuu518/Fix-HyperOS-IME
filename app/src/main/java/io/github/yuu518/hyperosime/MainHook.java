@@ -358,7 +358,7 @@ public final class MainHook extends XposedModule {
                 View view = (View) chain.getThisObject();
                 for (ImeSession session : sessions.values()) {
                     if (session.inputFrame == view && session.hasBottom()) {
-                        return chain.proceed(new Object[]{session.withoutNavigationBottom((WindowInsets) chain.getArg(0))});
+                        return chain.proceed(new Object[]{session.withBottomInset((WindowInsets) chain.getArg(0))});
                     }
                 }
                 return chain.proceed();
@@ -369,7 +369,7 @@ public final class MainHook extends XposedModule {
                 if (original != null) {
                     for (ImeSession session : sessions.values()) {
                         if (session.hasBottom() && session.isKeyboardWindow(view)) {
-                            return session.withoutNavigationBottom(original);
+                            return session.withBottomInset(original);
                         }
                     }
                 }
@@ -470,13 +470,13 @@ public final class MainHook extends XposedModule {
         log(Log.INFO, TAG, message);
     }
 
-    void applyBottomColor(int color, int foreground) {
+    void applyBottomColor(int color, int foreground, boolean force) {
         if (bottomColor == null) {
             return;
         }
         try {
             View view = (View) HookContracts.field(bottomColor.getDeclaringClass(), "sBottomView", null);
-            if (view != null && view.getBackground() instanceof ColorDrawable background
+            if (!force && view != null && view.getBackground() instanceof ColorDrawable background
                     && background.getColor() == color) {
                 return;
             }
